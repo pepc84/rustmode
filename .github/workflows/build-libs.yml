@@ -1,0 +1,202 @@
+name: build-libs
+
+# Builds all native libs (tree-sitter-rust grammar + JNI bridge) for every
+# supported platform from vendored C sources, then commits them into lib/.
+# Trigger manually or any time vendored sources or the JNI code changes.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'vendor/**'
+      - 'jni/**'
+      - '.github/workflows/build-libs.yml'
+
+jobs:
+  # ── Per-platform builds ────────────────────────────────────────────────────
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86-64
+            cc: gcc
+            so_prefix: lib
+            so_ext: so
+            shared_flags: "-shared -fPIC"
+            jni_os_include: linux
+
+          - os: macos-13
+            platform: macos-x86-64
+            cc: clang
+            so_prefix: lib
+            so_ext: dylib
+            shared_flags: "-shared -fPIC -undefined dynamic_lookup"
+            jni_os_include: darwin
+
+          - os: macos-latest
+            platform: macos-arm64
+            cc: clang
+            so_prefix: lib
+            so_ext: dylib
+            shared_flags: "-shared -fPIC -undefined dynamic_lookup"
+            jni_os_include: darwin
+
+          - os: windows-latest
+            platform: windows-x86-64
+            cc: gcc
+            so_prefix: ""
+            so_ext: dll
+            shared_flags: "-shared"
+            jni_os_include: win32
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      # ── tree-sitter-rust grammar (vendored C sources) ────────────────────
+
+      - name: Build libtree-sitter-rust (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          ${{ matrix.cc }} -O2 ${{ matrix.shared_flags }} \
+            -o /tmp/${{ matrix.so_prefix }}tree-sitter-rust.${{ matrix.so_ext }} \
+            vendor/tree-sitter-rust/src/parser.c \
+            vendor/tree-sitter-rust/src/scanner.c \
+            -Ivendor/tree-sitter-rust/src
+
+      - name: Build tree-sitter-rust (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          ${{ matrix.cc }} -O2 ${{ matrix.shared_flags }} \
+            -o /tmp/tree-sitter-rust.dll \
+            vendor/tree-sitter-rust/src/parser.c \
+            vendor/tree-sitter-rust/src/scanner.c \
+            -Ivendor/tree-sitter-rust/src
+
+      # ── JNI bridge (our jni/jts_impl.c + vendored grammar) ──────────────
+
+      - name: Build libjava-tree-sitter (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          ${{ matrix.cc }} -O2 ${{ matrix.shared_flags }} \
+            -o /tmp/${{ matrix.so_prefix }}java-tree-sitter.${{ matrix.so_ext }} \
+            jni/jts_impl.c \
+            vendor/tree-sitter-rust/src/parser.c \
+            vendor/tree-sitter-rust/src/scanner.c \
+            -Ijni \
+            -Ivendor/tree-sitter-rust/src \
+            -I"$JAVA_HOME/include" \
+            -I"$JAVA_HOME/include/${{ matrix.jni_os_include }}" \
+            -Wl,-rpath,'$ORIGIN'
+
+      - name: Build java-tree-sitter (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          ${{ matrix.cc }} -O2 ${{ matrix.shared_flags }} \
+            -o /tmp/java-tree-sitter.dll \
+            jni/jts_impl.c \
+            vendor/tree-sitter-rust/src/parser.c \
+            vendor/tree-sitter-rust/src/scanner.c \
+            -Ijni \
+            -Ivendor/tree-sitter-rust/src \
+            -I"$JAVA_HOME/include" \
+            -I"$JAVA_HOME/include/win32"
+
+      # ── Build java-tree-sitter.jar (Ubuntu only) ─────────────────────────
+
+      - name: Build java-tree-sitter.jar
+        if: matrix.platform == 'linux-x86-64'
+        shell: bash
+        run: |
+          mkdir -p /tmp/jts-classes
+          # Compile the Java JNI binding sources from jni/java/
+          find jni/java -name "*.java" > /tmp/jts-sources.txt
+          javac --release 17 -d /tmp/jts-classes @/tmp/jts-sources.txt
+          jar cf /tmp/java-tree-sitter.jar -C /tmp/jts-classes .
+
+      # ── Upload artifacts ─────────────────────────────────────────────────
+
+      - name: Upload native libs
+        uses: actions/upload-artifact@v4
+        with:
+          name: libs-${{ matrix.platform }}
+          path: |
+            /tmp/${{ matrix.so_prefix }}tree-sitter-rust.${{ matrix.so_ext }}
+            /tmp/${{ matrix.so_prefix }}java-tree-sitter.${{ matrix.so_ext }}
+            /tmp/tree-sitter-rust.dll
+            /tmp/java-tree-sitter.dll
+          if-no-files-found: error
+
+      - name: Upload jar (Ubuntu only)
+        if: matrix.platform == 'linux-x86-64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: java-tree-sitter-jar
+          path: /tmp/java-tree-sitter.jar
+          if-no-files-found: error
+
+  # ── Commit everything into lib/ ────────────────────────────────────────────
+  commit-libs:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/artifacts
+
+      - name: Copy libs into place
+        shell: bash
+        run: |
+          set -e
+          copy() { src="$1"; dest="$2"; [ -f "$src" ] && cp "$src" "$dest" && echo "  $dest" || true; }
+
+          mkdir -p \
+            lib/linux-x86-64 \
+            lib/macos-x86-64 \
+            lib/macos-arm64 \
+            lib/windows-x86-64
+
+          copy /tmp/artifacts/libs-linux-x86-64/libtree-sitter-rust.so    lib/linux-x86-64/libtree-sitter-rust.so
+          copy /tmp/artifacts/libs-linux-x86-64/libjava-tree-sitter.so    lib/linux-x86-64/libjava-tree-sitter.so
+          copy /tmp/artifacts/libs-macos-x86-64/libtree-sitter-rust.dylib lib/macos-x86-64/libtree-sitter-rust.dylib
+          copy /tmp/artifacts/libs-macos-x86-64/libjava-tree-sitter.dylib lib/macos-x86-64/libjava-tree-sitter.dylib
+          copy /tmp/artifacts/libs-macos-arm64/libtree-sitter-rust.dylib  lib/macos-arm64/libtree-sitter-rust.dylib
+          copy /tmp/artifacts/libs-macos-arm64/libjava-tree-sitter.dylib  lib/macos-arm64/libjava-tree-sitter.dylib
+          copy /tmp/artifacts/libs-windows-x86-64/tree-sitter-rust.dll    lib/windows-x86-64/tree-sitter-rust.dll
+          copy /tmp/artifacts/libs-windows-x86-64/java-tree-sitter.dll    lib/windows-x86-64/java-tree-sitter.dll
+          copy /tmp/artifacts/java-tree-sitter-jar/java-tree-sitter.jar   lib/java-tree-sitter.jar
+
+          find lib -name '.gitkeep' -delete
+
+      - name: Commit and push
+        shell: bash
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add lib/
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git pull --rebase origin "${{ github.ref_name }}"
+            git commit -m "ci: update native libs [skip ci]"
+            git push origin HEAD:"${{ github.ref_name }}"
+          fi

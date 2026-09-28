@@ -1,0 +1,252 @@
+# RustMode keyword list
+# Format: TOKEN \t TYPE
+# Types: KEYWORD1 (language kws), KEYWORD2 (Processing API), KEYWORD3 (literals/types),
+#        FUNCTION1 (Processing fns), FUNCTION2 (user fn hint), RESERVED (reserved words)
+#
+# Processing 4 reads this file to colour tokens in the editor.
+
+# ── Rust language keywords ────────────────────────────────────────────────────
+as	KEYWORD1
+async	KEYWORD1
+await	KEYWORD1
+break	KEYWORD1
+const	KEYWORD1
+continue	KEYWORD1
+crate	KEYWORD1
+dyn	KEYWORD1
+else	KEYWORD1
+enum	KEYWORD1
+extern	KEYWORD1
+false	KEYWORD3
+fn	KEYWORD1
+for	KEYWORD1
+if	KEYWORD1
+impl	KEYWORD1
+in	KEYWORD1
+let	KEYWORD1
+loop	KEYWORD1
+match	KEYWORD1
+mod	KEYWORD1
+move	KEYWORD1
+mut	KEYWORD1
+pub	KEYWORD1
+ref	KEYWORD1
+return	KEYWORD1
+self	KEYWORD1
+Self	KEYWORD1
+static	KEYWORD1
+struct	KEYWORD1
+super	KEYWORD1
+trait	KEYWORD1
+true	KEYWORD3
+type	KEYWORD1
+unsafe	KEYWORD1
+use	KEYWORD1
+where	KEYWORD1
+while	KEYWORD1
+
+# ── Primitive types ───────────────────────────────────────────────────────────
+bool	KEYWORD3
+char	KEYWORD3
+f32	KEYWORD3
+f64	KEYWORD3
+i8	KEYWORD3
+i16	KEYWORD3
+i32	KEYWORD3
+i64	KEYWORD3
+i128	KEYWORD3
+isize	KEYWORD3
+str	KEYWORD3
+u8	KEYWORD3
+u16	KEYWORD3
+u32	KEYWORD3
+u64	KEYWORD3
+u128	KEYWORD3
+usize	KEYWORD3
+String	KEYWORD3
+
+# ── Processing API — console ─────────────────────────────────────────────────
+println	FUNCTION1
+print	FUNCTION1
+
+# ── Processing API — canvas / window ─────────────────────────────────────────
+size	FUNCTION1
+fullScreen	FUNCTION1
+full_screen	FUNCTION1
+frameRate	FUNCTION1
+frame_rate	FUNCTION1
+noLoop	FUNCTION1
+no_loop	FUNCTION1
+loop	FUNCTION1
+redraw	FUNCTION1
+exit	FUNCTION1
+windowTitle	FUNCTION1
+window_title	FUNCTION1
+smooth	FUNCTION1
+noSmooth	FUNCTION1
+no_smooth	FUNCTION1
+noCursor	FUNCTION1
+no_cursor	FUNCTION1
+cursor	FUNCTION1
+
+# ── Processing API — color / drawing ─────────────────────────────────────────
+background	FUNCTION1
+background_rgb	FUNCTION1
+background_rgba	FUNCTION1
+background_color	FUNCTION1
+fill	FUNCTION1
+fill_rgb	FUNCTION1
+fill_rgba	FUNCTION1
+fill_color	FUNCTION1
+noFill	FUNCTION1
+no_fill	FUNCTION1
+stroke	FUNCTION1
+stroke_rgb	FUNCTION1
+stroke_rgba	FUNCTION1
+stroke_color	FUNCTION1
+noStroke	FUNCTION1
+no_stroke	FUNCTION1
+strokeWeight	FUNCTION1
+stroke_weight	FUNCTION1
+color	FUNCTION1
+color_rgb	FUNCTION1
+color_rgba	FUNCTION1
+lerpColor	FUNCTION1
+lerp_color	FUNCTION1
+pushStyle	FUNCTION1
+push_style	FUNCTION1
+popStyle	FUNCTION1
+pop_style	FUNCTION1
+
+# ── Processing API — shapes ───────────────────────────────────────────────────
+ellipse	FUNCTION1
+circle	FUNCTION1
+rect	FUNCTION1
+rectRounded	FUNCTION1
+rect_rounded	FUNCTION1
+square	FUNCTION1
+triangle	FUNCTION1
+line	FUNCTION1
+point	FUNCTION1
+quad	FUNCTION1
+arc	FUNCTION1
+
+# ── Processing API — transforms ───────────────────────────────────────────────
+pushMatrix	FUNCTION1
+push_matrix	FUNCTION1
+popMatrix	FUNCTION1
+pop_matrix	FUNCTION1
+translate	FUNCTION1
+rotate	FUNCTION1
+scale	FUNCTION1
+
+# ── Processing API — text ─────────────────────────────────────────────────────
+text	FUNCTION1
+textSize	FUNCTION1
+text_size	FUNCTION1
+textWidth	FUNCTION1
+text_width	FUNCTION1
+
+# ── Processing API — math ─────────────────────────────────────────────────────
+abs	FUNCTION1
+ceil	FUNCTION1
+floor	FUNCTION1
+round	FUNCTION1
+sqrt	FUNCTION1
+pow	FUNCTION1
+log	FUNCTION1
+exp	FUNCTION1
+min	FUNCTION1
+max	FUNCTION1
+constrain	FUNCTION1
+map	FUNCTION1
+lerp	FUNCTION1
+dist	FUNCTION1
+mag	FUNCTION1
+degrees	FUNCTION1
+radians	FUNCTION1
+noise	FUNCTION1
+noise2	FUNCTION1
+random	FUNCTION1
+random_range	FUNCTION1
+randomSeed	FUNCTION1
+random_seed	FUNCTION1
+
+# ── Processing API — globals ──────────────────────────────────────────────────
+mouseX	KEYWORD2
+mouseY	KEYWORD2
+mouse_x	KEYWORD2
+mouse_y	KEYWORD2
+pmouseX	KEYWORD2
+pmouseY	KEYWORD2
+pmouse_x	KEYWORD2
+pmouse_y	KEYWORD2
+width	KEYWORD2
+height	KEYWORD2
+frameCount	KEYWORD2
+frame_count	KEYWORD2
+millis	KEYWORD2
+key	KEYWORD2
+keyCode	KEYWORD2
+key_code	KEYWORD2
+mousePressed	KEYWORD2
+keyPressed	KEYWORD2
+focused	KEYWORD2
+mouse_wheel_delta	KEYWORD2
+
+# ── Processing API — constants ────────────────────────────────────────────────
+PI	KEYWORD2
+TWO_PI	KEYWORD2
+HALF_PI	KEYWORD2
+QUARTER_PI	KEYWORD2
+
+# ── Key code constants ────────────────────────────────────────────────────────
+UP	KEYWORD2
+DOWN	KEYWORD2
+LEFT	KEYWORD2
+RIGHT	KEYWORD2
+ENTER	KEYWORD2
+BACKSPACE	KEYWORD2
+DELETE	KEYWORD2
+ESCAPE	KEYWORD2
+TAB	KEYWORD2
+HOME	KEYWORD2
+END	KEYWORD2
+PAGE_UP	KEYWORD2
+PAGE_DOWN	KEYWORD2
+SHIFT	KEYWORD2
+CONTROL	KEYWORD2
+F1	KEYWORD2
+F2	KEYWORD2
+F3	KEYWORD2
+F4	KEYWORD2
+F5	KEYWORD2
+F6	KEYWORD2
+F7	KEYWORD2
+F8	KEYWORD2
+F9	KEYWORD2
+F10	KEYWORD2
+F11	KEYWORD2
+F12	KEYWORD2
+
+# ── Lifecycle functions ────────────────────────────────────────────────────────
+setup	FUNCTION2
+draw	FUNCTION2
+mouse_pressed	FUNCTION2
+mouse_released	FUNCTION2
+mouse_moved	FUNCTION2
+mouse_dragged	FUNCTION2
+mouse_wheel	FUNCTION2
+key_pressed	FUNCTION2
+key_released	FUNCTION2
+key_typed	FUNCTION2
+mouseReleased	FUNCTION2
+mouseMoved	FUNCTION2
+mouseDragged	FUNCTION2
+mouseWheel	FUNCTION2
+keyReleased	FUNCTION2
+keyTyped	FUNCTION2
+
+# ── App builder ───────────────────────────────────────────────────────────────
+App	KEYWORD2
+SketchState	KEYWORD2

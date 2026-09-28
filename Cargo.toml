@@ -1,0 +1,23 @@
+[package]
+name = "processing"
+version = "0.1.0"
+edition = "2021"
+description = "Processing-style API for RustMode sketches"
+
+[dependencies]
+# Low-overhead RwLock / Mutex for the global sketch state cells.
+parking_lot = "0.12"
+# Software pixel-buffer windowing for native sketches (not used under --features wasm)
+minifb = "0.27"
+
+[features]
+default = []
+wasm    = []
+
+[profile.dev]
+opt-level = 1   # slightly faster dev builds; incremental still on
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

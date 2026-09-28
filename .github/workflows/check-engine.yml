@@ -1,0 +1,78 @@
+name: check-engine
+
+# Validates that:
+#   1. The processing crate (src/lib.rs + Cargo.toml) compiles cleanly.
+#   2. All examples/*/expected_main.rs compile against it.
+#
+# Runs on every push or PR that touches the Rust source.
+
+on:
+  push:
+    paths:
+      - 'src/lib.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'examples/**'
+      - '.github/workflows/check-engine.yml'
+  pull_request:
+    paths:
+      - 'src/lib.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'examples/**'
+
+jobs:
+  check:
+    name: cargo check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-
+
+      # ── Check the processing crate itself ──────────────────────────────────
+      - name: cargo check (processing crate)
+        run: cargo check --manifest-path Cargo.toml
+
+      # ── Check each example expected output ────────────────────────────────
+      # We create a throwaway sketch project in /tmp that depends on the crate
+      # via a path dep, then swap in each expected_main.rs as main.rs.
+      - name: Set up sketch test project
+        run: |
+          mkdir -p /tmp/sketch-test/src
+          WORKSPACE="${{ github.workspace }}"
+          cat > /tmp/sketch-test/Cargo.toml <<EOF
+          [package]
+          name = "sketch"
+          version = "0.1.0"
+          edition = "2021"
+
+          [dependencies]
+          processing = { path = "$WORKSPACE" }
+          EOF
+
+      - name: Check Bouncing_Ball
+        run: |
+          cp examples/Bouncing_Ball/expected_main.rs /tmp/sketch-test/src/main.rs
+          cargo check --manifest-path /tmp/sketch-test/Cargo.toml
+
+      - name: Check Clock
+        run: |
+          cp examples/Clock/expected_main.rs /tmp/sketch-test/src/main.rs
+          cargo check --manifest-path /tmp/sketch-test/Cargo.toml
+
+      - name: Check Interactive_Colors
+        run: |
+          cp examples/Interactive_Colors/expected_main.rs /tmp/sketch-test/src/main.rs
+          cargo check --manifest-path /tmp/sketch-test/Cargo.toml

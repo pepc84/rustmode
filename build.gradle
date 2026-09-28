@@ -1,0 +1,173 @@
+// RustMode build.gradle
+//
+// Standalone build — does not require the processing4 source tree.
+//
+// Usage (run from RustMode/):
+//   gradle jar                       # build RustMode.jar
+//   gradle jar -Pcore=/path/core.jar # explicit core.jar path
+//
+// Or from the processing4 root if you have the full checkout:
+//   ./gradlew :RustMode:jar
+//
+// Output: RustMode/mode/RustMode.jar  (fat jar, includes tree-sitter binding)
+
+plugins {
+    id 'java'
+}
+
+group   = 'processing.mode.rust'
+version = '0.1.0'
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+// ── Locate Processing core.jar ────────────────────────────────────────────────
+//
+// Search order:
+//   1. -Pcore=<path>  (explicit override)
+//   2. $PROCESSING4_CORE env var
+//   3. ~/processing-4/core/library/core.jar   (Linux installer default)
+//   4. /opt/processing/core/library/core.jar
+//   5. /usr/local/lib/processing/core/library/core.jar
+//   6. macOS app bundle: /Applications/Processing.app/…/core.jar
+//   7. Gradle cache (if core was previously resolved via the processing4 build)
+//
+// If none of these exist at configure time the build still succeeds if you
+// set the `core` property — it is only checked when compileJava runs.
+
+def coreJar = null
+
+if (project.hasProperty('core')) {
+    coreJar = file(project.property('core'))
+} else if (System.getenv('PROCESSING4_CORE')) {
+    coreJar = file(System.getenv('PROCESSING4_CORE'))
+} else {
+    def candidates = [
+        "${System.getProperty('user.home')}/processing-4/core/library/core.jar",
+        "${System.getProperty('user.home')}/processing4/core/library/core.jar",
+        "/opt/processing/core/library/core.jar",
+        "/opt/processing4/core/library/core.jar",
+        "/usr/local/lib/processing/core/library/core.jar",
+        "/Applications/Processing.app/Contents/Java/core/library/core.jar",
+    ]
+    for (candidate in candidates) {
+        def f = file(candidate)
+        if (f.exists()) { coreJar = f; break }
+    }
+}
+
+if (coreJar == null) {
+    logger.warn("""
+WARNING: Processing core.jar not found. Build will fail at compile time.
+Fix options:
+  gradle jar -Pcore=/path/to/core.jar
+  export PROCESSING4_CORE=/path/to/core.jar
+  Install Processing 4 to ~/processing-4/ (Linux) or /Applications/ (macOS)
+""")
+    // Use a placeholder so configure phase succeeds.
+    coreJar = file("${System.getProperty('user.home')}/processing-4/core/library/core.jar")
+} else {
+    logger.info("Using core.jar: ${coreJar}")
+}
+
+// ── Dependencies ──────────────────────────────────────────────────────────────
+
+repositories {}
+
+def appJar = null
+if (project.hasProperty('app')) {
+    appJar = new File(project.property('app').toString())
+} else {
+    def appCandidates = [
+        "${System.getProperty('user.home')}/Projects/processing4/app/build/libs/app.jar",
+        "${System.getProperty('user.home')}/processing-4/lib/app.jar",
+        "/opt/processing4/lib/app.jar",
+    ]
+    for (candidate in appCandidates) {
+        def f = new File(candidate)
+        if (f.exists()) { appJar = f; break }
+    }
+}
+
+def compileJars = [coreJar]
+println "DEBUG appJar=${appJar}"
+if (appJar != null) {
+    compileJars << appJar
+    println "DEBUG app.jar exists=${appJar.exists()}"
+} else {
+    println "DEBUG app.jar not found"
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // Processing 4 core + app — provided by the installed IDE at runtime; not bundled.
+    compileOnly files(compileJars)
+
+    // java-tree-sitter binding — vendored directly in lib/.
+    // Get it once: clone https://github.com/serenadeai/java-tree-sitter and
+    // run `gradle jar`, then cp build/libs/*.jar lib/java-tree-sitter.jar
+    implementation 'ch.usi.si.seart:java-tree-sitter:1.9.1'
+}
+
+sourceSets {
+    main {
+        java {
+            srcDirs = ["${projectDir}/src/java"]
+        }
+    }
+}
+
+// ── Jar task ──────────────────────────────────────────────────────────────────
+
+jar {
+    archiveFileName    = 'RustMode.jar'
+    destinationDirectory = file("${projectDir}/mode")
+
+    // Bundle the native tree-sitter-rust grammar for each platform so
+    // RustMode.loadNativeTreeSitter() can extract it at startup.
+    from("${projectDir}/lib/linux-x86-64")   { into 'lib/linux-x86-64'   }
+    from("${projectDir}/lib/macos-arm64")     { into 'lib/macos-arm64'    }
+    from("${projectDir}/lib/macos-x86-64")    { into 'lib/macos-x86-64'   }
+    from("${projectDir}/lib/windows-x86-64")  { into 'lib/windows-x86-64' }
+
+    manifest {
+        attributes 'Implementation-Title':   'RustMode',
+                   'Implementation-Version': archiveVersion
+    }
+
+    // Fat jar: bundle tree-sitter binding classes so the IDE does not need it
+    // on its own classpath.
+    from({
+        configurations.runtimeClasspath.collect {
+            it.isDirectory() ? it : zipTree(it)
+        }
+    }) {
+        // the maven jar ships musl natives that won't load on glibc;
+        // ours come from native/build.sh under lib/<platform>/
+        exclude '*.so', '*.dylib', '*.dll'
+    }
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
+
+// ── Convenience tasks ─────────────────────────────────────────────────────────
+
+tasks.register('install') {
+    dependsOn jar
+    group = 'RustMode'
+    description = 'Build the jar and verify it landed in mode/.'
+    doLast {
+        def dest = file("${projectDir}/mode/RustMode.jar")
+        if (!dest.exists()) {
+            throw new GradleException("mode/RustMode.jar not found after build")
+        }
+        def kb = dest.length() / 1024
+        println "ok  mode/RustMode.jar  (${kb} KB)"
+        println ""
+        println "Restart Processing to load the updated mode."
+    }
+}

@@ -1,0 +1,11 @@
+build/
+.gradle/
+native/.build/
+mode/*.jar
+lib/**/*.so
+lib/**/*.dylib
+lib/**/*.dll
+target/
+*.log
+core.*
+hs_err_pid*

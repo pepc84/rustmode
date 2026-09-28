@@ -1,0 +1,147 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  # ── Build the mode jar (once, on Linux) ──────────────────────────────────
+  jar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 17 }
+      - name: Download Processing jars
+        run: |
+          curl -sL https://github.com/processing/processing4/releases/download/processing-1294-4.3/processing-4.3-linux-x64.tgz \
+            | tar xz --strip-components=1 -C /tmp processing-4.3/core/library/core.jar \
+                                                     processing-4.3/lib/app.jar 2>/dev/null || true
+          # fallback: build from source is too slow; use pre-downloaded jars from cache
+          ls /tmp/core.jar /tmp/app.jar 2>/dev/null || \
+            echo "WARNING: processing jars not found, jar build may fail"
+      - name: Build jar
+        run: gradle jar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RustMode-jar
+          path: mode/RustMode.jar
+
+  # ── Pre-build deps for each platform ─────────────────────────────────────
+  prebuilt-deps:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86-64
+          - os: macos-13
+            platform: macos-x86-64
+          - os: macos-latest
+            platform: macos-arm64
+          - os: windows-latest
+            platform: windows-x86-64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.82.0"
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ matrix.platform }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build warmup sketch (compiles all deps)
+        shell: bash
+        run: |
+          mkdir -p /tmp/warmup/src
+          cat > /tmp/warmup/Cargo.toml << EOF
+          [package]
+          name = "warmup"
+          version = "0.1.0"
+          edition = "2021"
+          [dependencies]
+          processing = { path = "${{ github.workspace }}" }
+          EOF
+          cat > /tmp/warmup/src/main.rs << EOF
+          use processing::*;
+          fn setup() { size(1,1); }
+          fn draw() {}
+          fn main() { App::new((), |_|{}, |_|{}).run(); }
+          EOF
+          cargo build --manifest-path /tmp/warmup/Cargo.toml
+
+      - name: Collect dep rlibs
+        shell: bash
+        run: |
+          DEPS_DIR=/tmp/warmup/target/debug/deps
+          OUT=/tmp/prebuilt-deps-${{ matrix.platform }}
+          mkdir -p "$OUT"
+          # Copy all dep artifacts except warmup itself
+          find "$DEPS_DIR" -maxdepth 1 \( -name "*.rlib" -o -name "*.rmeta" -o -name "*.d" -o -name "*.so" -o -name "*.dylib" -o -name "*.dll" \) \
+            ! -name "warmup*" ! -name "processing*" \
+            -exec cp {} "$OUT/" \;
+          ls "$OUT" | wc -l
+          tar czf prebuilt-deps-${{ matrix.platform }}.tar.gz -C /tmp prebuilt-deps-${{ matrix.platform }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prebuilt-deps-${{ matrix.platform }}
+          path: prebuilt-deps-${{ matrix.platform }}.tar.gz
+
+  # ── Assemble per-platform zips and release ────────────────────────────────
+  release:
+    needs: [jar, prebuilt-deps]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Assemble platform zips
+        run: |
+          for platform in linux-x86-64 macos-x86-64 macos-arm64 windows-x86-64; do
+            mkdir -p dist/RustMode/mode
+            mkdir -p dist/RustMode/prebuilt-deps
+            mkdir -p dist/RustMode/lib/$platform
+
+            cp artifacts/RustMode-jar/RustMode.jar dist/RustMode/mode/
+            cp mode.properties dist/RustMode/
+            cp keywords.txt dist/RustMode/
+
+            # Native libs for this platform
+            if [ -d "lib/$platform" ]; then
+              cp lib/$platform/* dist/RustMode/lib/$platform/ 2>/dev/null || true
+            fi
+
+            # Prebuilt deps
+            cp artifacts/prebuilt-deps-$platform/prebuilt-deps-$platform.tar.gz \
+               dist/RustMode/prebuilt-deps/$platform.tar.gz
+
+            cd dist
+            zip -r ../RustMode-$platform.zip RustMode/
+            cd ..
+            rm -rf dist/RustMode
+          done
+
+      - name: Create GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: RustMode-*.zip
+          generate_release_notes: true
