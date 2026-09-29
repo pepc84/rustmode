@@ -90,13 +90,38 @@ mod core {
     // Simple xorshift RNG
     use std::sync::{Mutex, OnceLock};
     static RNG: OnceLock<Mutex<u64>> = OnceLock::new();
-    fn rng() -> &'static Mutex<u64> { RNG.get_or_init(|| Mutex::new(12345)) }
+    /// splitmix64: spreads any seed (even 1, 2, 3...) over the full u64 range,
+    /// so xorshift's first outputs aren't all near zero.
+    fn mix(mut z: u64) -> u64 {
+        z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        (z ^ (z >> 31)).max(1)
+    }
+    /// Seeded from the clock like Processing, unless random_seed() is called.
+    fn rng() -> &'static Mutex<u64> {
+        RNG.get_or_init(|| {
+            let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64).unwrap_or(12345);
+            Mutex::new(mix(t))
+        })
+    }
     fn next(s: &mut u64) -> u64 { *s ^= *s<<13; *s ^= *s>>7; *s ^= *s<<17; *s }
 
-    pub fn random_seed(seed: u64) { *rng().lock().unwrap() = seed; }
+    pub fn random_seed(seed: u64) { *rng().lock().unwrap() = mix(seed); }
+    static NOISE_OFFSET: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    pub fn noise_seed(seed: u64) {
+        NOISE_OFFSET.store((seed % 10_007) as u32, std::sync::atomic::Ordering::Relaxed);
+    }
+    fn noise_off() -> f32 { NOISE_OFFSET.load(std::sync::atomic::Ordering::Relaxed) as f32 * 17.31 }
+    pub fn noise3(x: f32, y: f32, z: f32) -> f32 {
+        let o = noise_off();
+        noise2(x + z * 57.13 + o, y + z * 31.71 - o)
+    }
     pub fn random_f32(low: f32, high: f32) -> f32 {
         let mut s = rng().lock().unwrap();
-        let t = next(&mut s) as f32 / u64::MAX as f32;
+        // top 24 bits -> [0, 1): exact in f32 and never rounds up to 1.0
+        let t = (next(&mut s) >> 40) as f32 / (1u64 << 24) as f32;
         low + (high - low) * t
     }
 }
@@ -861,6 +886,7 @@ mod render {
         let cell = ((TEXT_SIZE.with(|ts| *ts.borrow()) / 8.0).max(1.0).round()) as i32;
         let cell_f = cell as f32;
         let (cw, canvas_h) = canvas_dims();
+        let (x, y) = text_origin(s, x, y);
         let (tx, ty) = tfm(x, y);
         let mut cursor_x = tx;
         let mut buf = pixel_buf().lock();
@@ -894,6 +920,107 @@ mod render {
     pub fn set_text_size(size: f32) { TEXT_SIZE.with(|s| *s.borrow_mut() = size); }
 
     pub fn set_smooth(_on: bool) {}
+
+    pub fn reset_matrix() {
+        MATRIX_STACK.with(|s| *s.borrow_mut().last_mut().unwrap() = identity());
+    }
+
+    // ── Text alignment ────────────────────────────────────────────────────
+    // h: 0 left, 1 center, 2 right.  v: 0 top, 1 center, 2 bottom, 3 baseline.
+    // Default is (left, top) so existing sketches keep drawing text from its
+    // top-left corner.
+    thread_local! {
+        static TEXT_ALIGN: std::cell::Cell<(u8, u8)> = std::cell::Cell::new((0, 0));
+    }
+    pub fn set_text_align(h: u8, v: u8) { TEXT_ALIGN.with(|a| a.set((h.min(2), v.min(3)))); }
+    fn text_cell() -> f32 {
+        ((TEXT_SIZE.with(|ts| *ts.borrow()) / 8.0).max(1.0).round()) as f32
+    }
+    /// Glyphs are 7 rows above the baseline and 1 below.
+    pub fn text_ascent() -> f32 { 7.0 * text_cell() }
+    pub fn text_descent() -> f32 { 1.0 * text_cell() }
+    fn text_origin(s: &str, x: f32, y: f32) -> (f32, f32) {
+        let (h, v) = TEXT_ALIGN.with(|a| a.get());
+        let w = text_width(s);
+        let x = match h { 1 => x - w / 2.0, 2 => x - w, _ => x };
+        let y = match v {
+            1 => y - (text_ascent() + text_descent()) / 2.0,
+            2 => y - (text_ascent() + text_descent()),
+            3 => y - text_ascent(),
+            _ => y,
+        };
+        (x, y)
+    }
+
+    // ── Images ────────────────────────────────────────────────────────────
+    struct Img { w: usize, h: usize, px: Vec<Color> }
+    fn images() -> &'static parking_lot::Mutex<Vec<Img>> {
+        static I: std::sync::OnceLock<parking_lot::Mutex<Vec<Img>>> = std::sync::OnceLock::new();
+        I.get_or_init(|| parking_lot::Mutex::new(Vec::new()))
+    }
+    thread_local! {
+        static TINT: std::cell::Cell<Option<Color>> = std::cell::Cell::new(None);
+    }
+    pub fn set_tint(c: Option<Color>) { TINT.with(|t| t.set(c)); }
+
+    /// Load a PNG. Returns a 1-based id, or 0 if it couldn't be read.
+    pub fn load_image(path: &str) -> u64 {
+        let decode = || -> Result<Img, String> {
+            let f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+            let mut dec = png::Decoder::new(f);
+            dec.set_transformations(png::Transformations::normalize_to_color8());
+            let mut rd = dec.read_info().map_err(|e| e.to_string())?;
+            let mut buf = vec![0; rd.output_buffer_size()];
+            let info = rd.next_frame(&mut buf).map_err(|e| e.to_string())?;
+            let (w, h) = (info.width as usize, info.height as usize);
+            let ch = info.color_type.samples();
+            let px = buf[..w * h * ch].chunks(ch).map(|p| {
+                let f = |v: u8| v as f32 / 255.0;
+                match ch {
+                    1 => Color::from_gray(f(p[0])),
+                    2 => Color::from_rgba(f(p[0]), f(p[0]), f(p[0]), f(p[1])),
+                    3 => Color::from_rgb(f(p[0]), f(p[1]), f(p[2])),
+                    _ => Color::from_rgba(f(p[0]), f(p[1]), f(p[2]), f(p[3])),
+                }
+            }).collect();
+            Ok(Img { w, h, px })
+        };
+        match decode() {
+            Ok(img) => { let mut v = images().lock(); v.push(img); v.len() as u64 }
+            Err(e)  => { eprintln!("loadImage(\"{}\"): {} (only PNG is supported)", path, e); 0 }
+        }
+    }
+    pub fn image_size(id: u64) -> (f32, f32) {
+        let v = images().lock();
+        v.get((id as usize).wrapping_sub(1)).map(|i| (i.w as f32, i.h as f32)).unwrap_or((0.0, 0.0))
+    }
+    /// Draw an image scaled into (x, y, w, h). Follows translate/scale; ignores
+    /// rotation (the box is placed at the transformed corners).
+    pub fn draw_image(id: u64, x: f32, y: f32, w: f32, h: f32) {
+        let imgs = images().lock();
+        let img = match imgs.get((id as usize).wrapping_sub(1)) { Some(i) => i, None => return };
+        let (x0, y0) = tfm(x, y);
+        let (x1, y1) = tfm(x + w, y + h);
+        let (lx, hx) = (x0.min(x1), x0.max(x1));
+        let (ly, hy) = (y0.min(y1), y0.max(y1));
+        if hx - lx < 1.0 || hy - ly < 1.0 { return; }
+        let tint = TINT.with(|t| t.get());
+        let (cw, ch) = canvas_dims();
+        let mut buf = pixel_buf().lock();
+        for py in ly.floor() as i32..hy.ceil() as i32 {
+            let v = (py as f32 + 0.5 - ly) / (hy - ly);
+            if !(0.0..1.0).contains(&v) { continue; }
+            let sy = ((v * img.h as f32) as usize).min(img.h - 1);
+            for px in lx.floor() as i32..hx.ceil() as i32 {
+                let u = (px as f32 + 0.5 - lx) / (hx - lx);
+                if !(0.0..1.0).contains(&u) { continue; }
+                let sx = ((u * img.w as f32) as usize).min(img.w - 1);
+                let mut c = img.px[sy * img.w + sx];
+                if let Some(t) = tint { c = Color::from_rgba(c.r * t.r, c.g * t.g, c.b * t.b, c.a * t.a); }
+                if c.a > 0.0 { put(&mut buf, cw, ch, px, py, c); }
+            }
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -964,7 +1091,11 @@ mod glfw {
     pub fn set_window_title(t: &str) {
         *WANT_TITLE.get_or_init(|| Mutex::new(t.to_owned())).lock().unwrap() = t.to_owned();
     }
-    pub fn set_cursor_visible(_v: bool) {}
+    pub static MOUSE_BUTTON:   std::sync::atomic::AtomicU32  = std::sync::atomic::AtomicU32::new(0);
+    static CURSOR_VISIBLE:     std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+    pub fn set_cursor_visible(v: bool) { CURSOR_VISIBLE.store(v, Ordering::Relaxed); }
+    pub fn current_frame_rate() -> f32 { fps() }
+    pub fn is_looping() -> bool { looping() }
 
     pub struct Runner { title: String }
     impl Runner {
@@ -1018,7 +1149,15 @@ mod glfw {
                     .map(|(x,y)| (x, y))
                     .unwrap_or((0.0, 0.0));
 
-                let mouse_pressed = window.get_mouse_down(MouseButton::Left);
+                let (bl, br, bm) = (window.get_mouse_down(MouseButton::Left),
+                                    window.get_mouse_down(MouseButton::Right),
+                                    window.get_mouse_down(MouseButton::Middle));
+                let mouse_pressed = bl || br || bm;
+                if mouse_pressed {
+                    // Processing codes: LEFT 37, RIGHT 39, CENTER 3
+                    MOUSE_BUTTON.store(if bl { 37 } else if br { 39 } else { 3 }, Ordering::Relaxed);
+                }
+                window.set_cursor_visibility(CURSOR_VISIBLE.load(Ordering::Relaxed));
 
                 let millis = start.elapsed().as_millis() as u64;
                 let mut ctx = FrameContext {
@@ -1495,6 +1634,122 @@ pub fn cursor() {
     #[cfg(not(feature = "wasm"))] glfw::set_cursor_visible(true);
     #[cfg(feature = "wasm")]      wasm::set_cursor_visible(true);
 }
+
+// ─────────────────────────── Shapes: bezier / curve ──────────────────────────
+// (begin_shape / vertex / end_shape and the kind constants are further down.)
+
+pub const POLYGON: u8 = 0;
+#[inline] pub fn beginShape() { begin_shape() }
+#[inline] pub fn endShape() { end_shape() }
+#[inline] pub fn bezierVertex(cx1: f32, cy1: f32, cx2: f32, cy2: f32, x: f32, y: f32) { bezier_vertex(cx1, cy1, cx2, cy2, x, y) }
+#[inline] pub fn curveVertex(x: f32, y: f32) { curve_vertex(x, y) }
+
+pub fn bezier(x1: f32, y1: f32, cx1: f32, cy1: f32, cx2: f32, cy2: f32, x2: f32, y2: f32) {
+    begin_shape(); vertex(x1, y1); bezier_vertex(cx1, cy1, cx2, cy2, x2, y2); end_shape();
+}
+/// Catmull-Rom segment from (x1,y1) to (x2,y2); the outer points are controls.
+pub fn curve(cx1: f32, cy1: f32, x1: f32, y1: f32, x2: f32, y2: f32, cx2: f32, cy2: f32) {
+    begin_shape();
+    curve_vertex(cx1, cy1); curve_vertex(x1, y1); curve_vertex(x2, y2); curve_vertex(cx2, cy2);
+    end_shape();
+}
+
+pub fn reset_matrix() { render::reset_matrix(); }
+#[inline] pub fn resetMatrix() { reset_matrix() }
+
+// Stroke caps and joins are accepted for compatibility; the software
+// rasterizer always draws round-ish caps and mitred joins.
+pub fn stroke_cap(_cap: u32)  {}
+pub fn stroke_join(_join: u32) {}
+
+// ─────────────────────────── Text alignment ──────────────────────────────────
+
+pub const ALIGN_LEFT:     u8 = 0;
+pub const ALIGN_CENTER:   u8 = 1;
+pub const ALIGN_RIGHT:    u8 = 2;
+pub const ALIGN_TOP:      u8 = 0;
+pub const ALIGN_BOTTOM:   u8 = 2;
+pub const ALIGN_BASELINE: u8 = 3;
+
+/// h: ALIGN_LEFT / ALIGN_CENTER / ALIGN_RIGHT.
+/// v: ALIGN_TOP / ALIGN_CENTER / ALIGN_BOTTOM / ALIGN_BASELINE.
+pub fn text_align(h: u8, v: u8) { render::set_text_align(h, v); }
+pub fn text_ascent()  -> f32 { render::text_ascent() }
+pub fn text_descent() -> f32 { render::text_descent() }
+#[inline] pub fn textAlign(h: u8, v: u8) { text_align(h, v) }
+#[inline] pub fn textAscent() -> f32 { text_ascent() }
+#[inline] pub fn textDescent() -> f32 { text_descent() }
+
+// ─────────────────────────── Images ──────────────────────────────────────────
+
+/// PNG only. Returns an image id (0 if loading failed).
+pub fn load_image(path: &str) -> u64 { render::load_image(path) }
+pub fn image(id: u64, x: f32, y: f32) {
+    let (w, h) = render::image_size(id);
+    render::draw_image(id, x, y, w, h);
+}
+pub fn image_sized(id: u64, x: f32, y: f32, w: f32, h: f32) { render::draw_image(id, x, y, w, h); }
+pub fn image_width(id: u64)  -> f32 { render::image_size(id).0 }
+pub fn image_height(id: u64) -> f32 { render::image_size(id).1 }
+pub fn tint(gray: f32)                            { render::set_tint(Some(Color::from_gray(gray / 255.0))); }
+pub fn tint_rgba(r: f32, g: f32, b: f32, a: f32)  { render::set_tint(Some(Color::from_rgba(r/255.0, g/255.0, b/255.0, a/255.0))); }
+pub fn no_tint()                                  { render::set_tint(None); }
+#[inline] pub fn loadImage(path: &str) -> u64 { load_image(path) }
+#[inline] pub fn noTint() { no_tint() }
+
+// ─────────────────────────── More input / noise / random ─────────────────────
+
+/// Last mouse button pressed: 37 left, 39 right, 3 center (Processing codes).
+pub fn mouse_button() -> u32 {
+    #[cfg(not(feature = "wasm"))] { glfw::MOUSE_BUTTON.load(Ordering::Relaxed) }
+    #[cfg(feature = "wasm")]      { 37 }
+}
+#[inline] pub fn mouseButton() -> u32 { mouse_button() }
+
+pub fn noise3(x: f32, y: f32, z: f32) -> f32 { core::noise3(x, y, z) }
+pub fn noise_seed(seed: u64) { core::noise_seed(seed); }
+/// Accepted for compatibility; the value noise here has a single octave.
+pub fn noise_detail(_octaves: u32, _falloff: f32) {}
+#[inline] pub fn noiseSeed(seed: u64) { noise_seed(seed) }
+#[inline] pub fn randomGaussian() -> f32 { random_gaussian() }
+
+/// The target frame rate set by frame_rate().
+pub fn current_frame_rate() -> f32 {
+    #[cfg(not(feature = "wasm"))] { glfw::current_frame_rate() }
+    #[cfg(feature = "wasm")]      { 60.0 }
+}
+pub fn is_looping() -> bool {
+    #[cfg(not(feature = "wasm"))] { glfw::is_looping() }
+    #[cfg(feature = "wasm")]      { true }
+}
+
+// ─────────────────────────── saveFrame ───────────────────────────────────────
+
+/// Save the current canvas as a PNG. "#" runs in the name become the
+/// zero-padded frame number, like Processing: save_frame("out-####.png").
+pub fn save_frame(name: &str) {
+    let path = match name.find('#') {
+        Some(i) => {
+            let n = name[i..].chars().take_while(|c| *c == '#').count();
+            format!("{}{:0width$}{}", &name[..i], frame_count(), &name[i + n..], width = n)
+        }
+        None => name.to_owned(),
+    };
+    let (w, h) = (CANVAS_W.load(Ordering::Relaxed), CANVAS_H.load(Ordering::Relaxed));
+    let rgb: Vec<u8> = pixel_buf().lock().iter()
+        .flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8])
+        .collect();
+    let write = || -> Result<(), Box<dyn std::error::Error>> {
+        let f = std::io::BufWriter::new(std::fs::File::create(&path)?);
+        let mut enc = png::Encoder::new(f, w, h);
+        enc.set_color(png::ColorType::Rgb);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.write_header()?.write_image_data(&rgb)?;
+        Ok(())
+    };
+    if let Err(e) = write() { eprintln!("saveFrame(\"{}\"): {}", path, e); }
+}
+#[inline] pub fn saveFrame(name: &str) { save_frame(name) }
 
 // ─────────────────────────────── App builder ─────────────────────────────────
 
